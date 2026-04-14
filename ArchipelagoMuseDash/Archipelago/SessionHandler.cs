@@ -1,6 +1,7 @@
-﻿using Archipelago.MultiClient.Net;
+using Archipelago.MultiClient.Net;
 using Archipelago.MultiClient.Net.Enums;
 using Archipelago.MultiClient.Net.Packets;
+using ArchipelagoMuseDash.Patches;
 
 namespace ArchipelagoMuseDash.Archipelago;
 
@@ -54,7 +55,7 @@ public class SessionHandler {
         try
         {
             await session.ConnectAsync();
-            loginResult = await session.LoginAsync("Muse Dash", username, ItemsHandlingFlags.AllItems, password: password);
+            loginResult = await session.LoginAsync("Muse Dash Modded", username, ItemsHandlingFlags.AllItems, password: password);
         }
         catch (TaskCanceledException e)
         {
@@ -84,6 +85,7 @@ public class SessionHandler {
     /// </summary>
     public void StartSession() {
         _sessionStarted = true;
+        CustomAlbumsPatches.ResetReloadFlag();
         try {
             DataStorageHandler = new DataStorageHandler(_slot, _team, _currentSession.DataStorage);
             ItemHandler = new ItemHandler(_currentSession, _slot);
@@ -102,6 +104,18 @@ public class SessionHandler {
             ArchipelagoStatic.ArchLogger.Log("SessionHandler", $"Joined a server with version: {_currentSession.RoomState.Version.Major}:{_currentSession.RoomState.Version.Minor}:{_currentSession.RoomState.Version.Build}");
             ArchipelagoStatic.ArchLogger.Log("SessionHandler", $"Has Items: {hasItems}");
             
+            // Charger les custom songs depuis les slot data AP si disponibles
+            if (_slotData.TryGetValue("customSongs", out var customSongsRaw)) {
+                try {
+                    var json = Newtonsoft.Json.JsonConvert.SerializeObject(customSongsRaw);
+                    ArchipelagoStatic.AlbumDatabase.SetSlotDataCustomSongsFromJson(json);
+                    ArchipelagoStatic.ArchLogger.Log("SessionHandler", "Custom songs slot data passed to AlbumDatabase.");
+                }
+                catch (Exception ex) {
+                    ArchipelagoStatic.ArchLogger.Error("SessionHandler", ex);
+                }
+            }
+
             ArchipelagoStatic.AlbumDatabase.Setup();
             ItemHandler.Setup(_slotData, hasItems);
             HintHandler.Setup();

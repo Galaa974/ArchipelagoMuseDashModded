@@ -1,4 +1,4 @@
-﻿using ArchipelagoMuseDash.Archipelago;
+using ArchipelagoMuseDash.Archipelago;
 using ArchipelagoMuseDash.Helpers;
 using ArchipelagoMuseDash.Logging;
 using Il2Cpp;
@@ -49,4 +49,7 @@ public static class ArchipelagoStatic {
     //Custom Albums 4 Workaround
     public static MelonPreferences_Entry<bool> CustomAlbumsSaveEntry;
     public static MelonPreferences_Entry<bool> ArchipelagoOverridenCustomAlbums;
+
+    // Custom/Modded songs support
+    public static MelonPreferences_Entry<bool> UseModdedSongs;
 }

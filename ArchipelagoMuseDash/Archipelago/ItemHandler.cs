@@ -1,4 +1,4 @@
-﻿using Archipelago.MultiClient.Net;
+using Archipelago.MultiClient.Net;
 using Archipelago.MultiClient.Net.Enums;
 using Archipelago.MultiClient.Net.Models;
 using Archipelago.MultiClient.Net.Packets;
@@ -9,6 +9,7 @@ using Il2CppAssets.Scripts.Database;
 using Il2CppAssets.Scripts.UI.Controls;
 using UnityEngine.EventSystems;
 using Task = System.Threading.Tasks.Task;
+using System.Linq;
 
 namespace ArchipelagoMuseDash.Archipelago;
 
@@ -30,6 +31,10 @@ public class ItemHandler {
     private readonly int _currentPlayerSlot;
 
     private readonly Random _random = new();
+
+    // Queue pour différer le traitement des locations reçues hors du thread Unity.
+    // Evite les freezes/desyncs en combat quand un autre joueur complète une location.
+    private readonly Queue<IReadOnlyCollection<long>> _pendingLocationChecks = new();
 
     public ItemHandler(ArchipelagoSession session, int playerSlot) {
         _currentSession = session;
@@ -116,7 +121,6 @@ public class ItemHandler {
 
             }
             else {
-
                 ArchipelagoStatic.ArchLogger.Warning("ItemHandler", $"Unknown location: {name}");
             }
         }
@@ -131,7 +135,7 @@ public class ItemHandler {
                     var name = _currentSession.Items.GetItemName(id);
                     if (name == null)
                         continue;
-                    
+
                     if (ArchipelagoStatic.AlbumDatabase.TryGetMusicInfo(name, out var info))
                         _songIdDictionary[id] = ArchipelagoStatic.AlbumDatabase.GetItemIdForSong(info);
                 }
@@ -156,8 +160,22 @@ public class ItemHandler {
     }
 
     public void OnUpdate() {
-        if (ArchipelagoStatic.CurrentScene == "UISystem_PC")
+        if (ArchipelagoStatic.CurrentScene == "UISystem_PC") {
             CheckForNewItems();
+
+            // Traiter les location checks reçus depuis le thread réseau,
+            // uniquement quand on est dans le menu (pas en combat).
+            lock (_pendingLocationChecks) {
+                while (_pendingLocationChecks.Count > 0) {
+                    var locations = _pendingLocationChecks.Dequeue();
+                    foreach (var location in locations) {
+                        ArchipelagoStatic.ArchLogger.LogDebug("NewLocationCheck", $"New Location: {location}");
+                        var name = _currentSession.Locations.GetLocationNameFromId(location);
+                        CheckRemoteLocation(name[..^2], false);
+                    }
+                }
+            }
+        }
 
         if (ArchipelagoStatic.SessionHandler.SongSelectAdditions.ToggleSongsButton == null)
             return;
@@ -183,11 +201,13 @@ public class ItemHandler {
         }
     }
 
+    /// <summary>
+    ///     Appelé depuis le thread réseau d'Archipelago — ne jamais appeler Unity API ici.
+    ///     On met juste en queue pour traitement dans OnUpdate() sur le thread principal.
+    /// </summary>
     private void NewLocationChecked(IReadOnlyCollection<long> locations) {
-        foreach (var location in locations) {
-            ArchipelagoStatic.ArchLogger.LogDebug("NewLocationCheck", $"New Location: {location}");
-            var name = _currentSession.Locations.GetLocationNameFromId(location);
-            CheckRemoteLocation(name[..^2], false);
+        lock (_pendingLocationChecks) {
+            _pendingLocationChecks.Enqueue(locations);
         }
     }
 
@@ -215,7 +235,7 @@ public class ItemHandler {
 
         if (itemName == music_sheet_item_name)
             return new MusicSheetItem { Item = item };
-        
+
         if (!_songIdDictionary.TryGetValue(item.ItemId, out var songId))
             songId = item.ItemId;
 
@@ -295,17 +315,19 @@ public class ItemHandler {
             GlobalDataBase.dbMusicTag.AddCollection(info);
         }
 
-        var list = new Il2CppSystem.Collections.Generic.List<MusicInfo>();
-        GlobalDataBase.dbMusicTag.GetAllMusicInfo(list);
+        var list = ArchipelagoStatic.AlbumDatabase.GetAllMusic().ToList();
 
         ArchipelagoStatic.ArchLogger.Log("ItemHandler", $"Visibility being set to {mode}");
         HiddenSongMode = mode;
-        ArchipelagoHelpers.SelectNextAvailableSong();
 
         var hintedSongs = mode == ShownSongMode.Hinted ? ArchipelagoStatic.SessionHandler.HintHandler.GetHintedSongs() : new HashSet<string>();
 
         foreach (var song in list) {
             if (song.uid == AlbumDatabase.RANDOM_PANEL_UID)
+                continue;
+
+            // Les custom songs sont gérées séparément après les refreshes
+            if (song.uid.StartsWith("999"))
                 continue;
 
             if (!SongsInLogic.Contains(song.uid)) {
@@ -382,8 +404,47 @@ public class ItemHandler {
         }
 
         MusicTagManager.instance.RefreshDBDisplayMusics();
+
+        // RefreshMusicFSV avant la boucle custom (sinon il réinitialise notre état)
         if (ArchipelagoStatic.SongSelectPanel)
             ArchipelagoStatic.SongSelectPanel.RefreshMusicFSV();
+
+        // Re-appliquer hide/unhide + collection sur les custom songs APRES les refreshes
+        var hintHandler = ArchipelagoStatic.SessionHandler.HintHandler;
+        foreach (var customSong in ArchipelagoStatic.AlbumDatabase.GetAllMusic()) {
+            if (!customSong.uid.StartsWith("999"))
+                continue;
+
+            bool shouldShow = mode switch {
+                ShownSongMode.Unlocks => UnlockedSongUids.Contains(customSong.uid),
+                ShownSongMode.Unplayed => UnlockedSongUids.Contains(customSong.uid) && !CompletedSongUids.Contains(customSong.uid),
+                ShownSongMode.Hinted => hintHandler.HasLocationHint(customSong.uid) && !CompletedSongUids.Contains(customSong.uid),
+                ShownSongMode.AllInLogic => SongsInLogic.Contains(customSong.uid),
+                _ => true
+            };
+
+            if (shouldShow) {
+                GlobalDataBase.dbMusicTag.m_HideList.Remove(customSong.uid);
+                if (GlobalDataBase.dbMusicTag.IsMusicHide(customSong))
+                    GlobalDataBase.dbMusicTag.RemoveHide(customSong);
+                if (!GlobalDataBase.dbMusicTag.ContainsCollection(customSong))
+                    GlobalDataBase.dbMusicTag.AddCollection(customSong);
+            }
+            else {
+                if (!GlobalDataBase.dbMusicTag.m_HideList.Contains(customSong.uid))
+                    GlobalDataBase.dbMusicTag.m_HideList.Add(customSong.uid);
+                GlobalDataBase.dbMusicTag.AddHide(customSong);
+                if (GlobalDataBase.dbMusicTag.ContainsCollection(customSong))
+                    GlobalDataBase.dbMusicTag.RemoveCollection(customSong);
+            }
+        }
+
+        // Deuxième RefreshMusicFSV pour que la UI affiche l'état final des collections
+        if (ArchipelagoStatic.SongSelectPanel)
+            ArchipelagoStatic.SongSelectPanel.RefreshMusicFSV();
+
+        // Sélectionner la prochaine song disponible APRÈS que tout soit prêt
+        ArchipelagoHelpers.SelectNextAvailableSong();
     }
 
     private void AddHide(MusicInfo song, bool outsideSongSelect) {
@@ -448,13 +509,13 @@ public class ItemHandler {
 
             var locationsToCheck = new List<long>();
 
-            var location1 = _currentSession.Locations.GetLocationIdFromName("Muse Dash", locationName + "-0");
+            var location1 = _currentSession.Locations.GetLocationIdFromName("Muse Dash Modded", locationName + "-0");
             if (location1 != -1 && _currentSession.Locations.AllLocations.Contains(location1)) {
                 if (!_currentSession.Locations.AllLocationsChecked.Contains(location1))
                     locationsToCheck.Add(location1);
             }
 
-            var location2 = _currentSession.Locations.GetLocationIdFromName("Muse Dash", locationName + "-1");
+            var location2 = _currentSession.Locations.GetLocationIdFromName("Muse Dash Modded", locationName + "-1");
             if (location2 != -1 && _currentSession.Locations.AllLocations.Contains(location2)) {
                 if (!_currentSession.Locations.AllLocationsChecked.Contains(location2))
                     locationsToCheck.Add(location2);
@@ -480,7 +541,6 @@ public class ItemHandler {
             ArchipelagoStatic.ArchLogger.LogDebug("CheckLocations", "Received Items Packet.");
             CheckRemoteLocation(locationName, true);
             foreach (var networkItem in items) {
-
                 var item = GetItemFromNetworkItem(networkItem.Value, networkItem.Value.Player.Slot != _currentPlayerSlot, true);
                 if (item != null)
                     Unlocker.AddItem(item);
@@ -514,14 +574,13 @@ public class ItemHandler {
     }
 
     private bool IsSongFullyCompleted(string songKey) {
-        var location1 = _currentSession.Locations.GetLocationIdFromName("Muse Dash", songKey + "-0");
+        var location1 = _currentSession.Locations.GetLocationIdFromName("Muse Dash Modded", songKey + "-0");
         if (location1 != -1 && _currentSession.Locations.AllLocations.Contains(location1)) {
             if (!_currentSession.Locations.AllLocationsChecked.Contains(location1))
                 return false;
         }
 
-
-        var location2 = _currentSession.Locations.GetLocationIdFromName("Muse Dash", songKey + "-1");
+        var location2 = _currentSession.Locations.GetLocationIdFromName("Muse Dash Modded", songKey + "-1");
         if (location2 != -1 && _currentSession.Locations.AllLocations.Contains(location2)) {
             if (!_currentSession.Locations.AllLocationsChecked.Contains(location2))
                 return false;

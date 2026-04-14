@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using Archipelago.MultiClient.Net.Enums;
 using ArchipelagoMuseDash.Archipelago;
 using ArchipelagoMuseDash.Archipelago.Items;
@@ -13,8 +13,6 @@ using Il2CppAssets.Scripts.PeroTools.Nice.Interface;
 using Il2CppAssets.Scripts.UI.Controls;
 using Il2CppAssets.Scripts.UI.Panels;
 using Il2CppAssets.Scripts.UI.Panels.PnlRole;
-using Il2CppDaveGameFramework.GameComponents.GameHUD;
-using Il2CppDaveGameFramework.GameInstanceData;
 using Il2CppDG.Tweening;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Il2CppPeroTools2.Resources;
@@ -204,43 +202,6 @@ sealed class PnlVictoryPatch {
         }
     }
 }
-/// <summary>
-///     Gets called when the player completes the Dave Game Song.
-/// </summary>
-[HarmonyPatch(typeof(PnlDaveGameVictoryChild), "SetGameData")]
-[HarmonyPriority(Priority.Last)]
-sealed class PnlDaveGameVictoryPatch {
-
-    [HarmonyPriority(Priority.Last)]
-    private static void Postfix(DaveGameResultData resData) {
-        //Don't override normal gameplay
-        if (!ArchipelagoStatic.SessionHandler.IsLoggedIn)
-            return;
-        try
-        {
-            ArchipelagoStatic.ArchLogger.LogDebug("PnlVictoryDaveGame", $"Dave Game: {resData.evaluate}");
-            var activeTrap = ArchipelagoStatic.SessionHandler.BattleHandler.SetTrapFinished();
-            var kvp = resData.evaluate;
-            if (kvp < (int)ArchipelagoStatic.SessionHandler.ItemHandler.GradeNeeded) {
-                var reason = $"No Items Given:\nGrade result was worse than {ArchipelagoStatic.SessionHandler.ItemHandler.GradeNeeded}";
-                ShowText.ShowInfo(reason);
-                ArchipelagoStatic.ArchLogger.Log("PnlVictory", reason);
-                ArchipelagoStatic.SessionHandler.DeathLinkHandler.PlayerDied();
-                return;
-            }
-
-            //Music info must be grabbed now. The next frame it will be nulled and be unusable.
-            var musicInfo = GlobalDataBase.dbBattleStage.selectedMusicInfo;
-            var locationName = ArchipelagoStatic.AlbumDatabase.GetItemNameFromMusicInfo(musicInfo);
-            ArchipelagoStatic.SessionHandler.ItemHandler.CheckLocation(musicInfo.uid, locationName);
-            ArchipelagoStatic.SessionHandler.BattleHandler.OnBattleEnd(false, activeTrap);
-        }
-        catch (Exception e) {
-            ArchipelagoStatic.ArchLogger.Error("PnlVictory", e);
-        }
-    }
-}
-
 /// <summary>
 ///     Called every time the Cell moves. Used to update the cell to show the right status.
 ///     Note that this is call per frame during movement.
@@ -611,10 +572,125 @@ sealed class DBMusicTagRefreshShowMusicUidsPatch {
                     j++;
                 }
             }
+
         }
         catch (Exception e) {
             ArchipelagoStatic.ArchLogger.Error("RefreshPatch", e);
         }
     }
+
+    // Postfix pour filtrer les custom songs APRES que CustomAlbums les ait injectées
+    private static void Postfix(Il2CppSystem.Collections.Generic.List<string> buffer) {
+        try {
+            if (!ArchipelagoStatic.SessionHandler.IsLoggedIn || ArchipelagoStatic.IsLoadingAP)
+                return;
+
+            var itemHandler = ArchipelagoStatic.SessionHandler.ItemHandler;
+            var mode = itemHandler.HiddenSongMode;
+            var goalSongUid = itemHandler.GoalSong.uid;
+            var toRemove = new System.Collections.Generic.List<string>();
+            for (var i = 0; i < buffer.Count; i++) {
+                var uid = buffer[i];
+                if (!uid.StartsWith("999") || uid == goalSongUid)
+                    continue;
+                bool shouldHide = mode switch {
+                    ShownSongMode.Unlocks => !itemHandler.UnlockedSongUids.Contains(uid),
+                    ShownSongMode.Unplayed => !itemHandler.UnlockedSongUids.Contains(uid) || itemHandler.CompletedSongUids.Contains(uid),
+                    ShownSongMode.Hinted => !ArchipelagoStatic.SessionHandler.HintHandler.HasLocationHint(uid) || itemHandler.CompletedSongUids.Contains(uid),
+                    ShownSongMode.AllInLogic => !itemHandler.SongsInLogic.Contains(uid),
+                    _ => false
+                };
+                if (shouldHide)
+                    toRemove.Add(uid);
+            }
+            foreach (var uid in toRemove)
+                buffer.Remove(uid);
+        }
+        catch (Exception e) {
+            ArchipelagoStatic.ArchLogger.Error("RefreshPatchPostfix", e);
+        }
+    }
 }
 
+/// <summary>
+///     Intercepte DBMusicTag.AddHide pour bloquer le recachage des custom songs
+///     quand elles doivent être visibles selon le mode actif.
+/// </summary>
+[HarmonyPatch(typeof(DBMusicTag), "AddHide")]
+sealed class DBMusicTagAddHidePatch {
+    private static bool Prefix(MusicInfo musicInfo) {
+        try {
+            if (!ArchipelagoStatic.SessionHandler.IsLoggedIn || ArchipelagoStatic.IsLoadingAP)
+                return true;
+            if (musicInfo == null || !musicInfo.uid.StartsWith("999"))
+                return true;
+
+            var itemHandler = ArchipelagoStatic.SessionHandler.ItemHandler;
+            var mode = itemHandler.HiddenSongMode;
+            var uid = musicInfo.uid;
+
+            bool shouldShow = mode switch {
+                ShownSongMode.Unlocks => itemHandler.UnlockedSongUids.Contains(uid),
+                ShownSongMode.Unplayed => itemHandler.UnlockedSongUids.Contains(uid) && !itemHandler.CompletedSongUids.Contains(uid),
+                ShownSongMode.Hinted => ArchipelagoStatic.SessionHandler.HintHandler.HasLocationHint(uid) && !itemHandler.CompletedSongUids.Contains(uid),
+                ShownSongMode.AllInLogic => itemHandler.SongsInLogic.Contains(uid),
+                _ => false
+            };
+
+            if (shouldShow) {
+                ArchipelagoStatic.ArchLogger.Log("AddHideBlocked", $"Blocked AddHide for {uid} in mode {mode}");
+                return false; // bloquer l'appel
+            }
+            return true;
+        }
+        catch {
+            return true;
+        }
+    }
+}
+
+/// <summary>
+///     Patche DBMusicTag.stageShowMusicList (getter) pour filtrer les custom songs
+///     selon le mode AP actif. C'est la liste principale utilisée par la UI.
+/// </summary>
+[HarmonyPatch(typeof(DBMusicTag), "get_stageShowMusicList")]
+sealed class DBMusicTagStageShowMusicListPatch {
+    private static void Postfix(ref Il2CppSystem.Collections.Generic.List<string> __result) {
+        try {
+            if (__result == null || __result.Count == 0)
+                return;
+            if (!ArchipelagoStatic.SessionHandler.IsLoggedIn || ArchipelagoStatic.IsLoadingAP)
+                return;
+
+            var itemHandler = ArchipelagoStatic.SessionHandler.ItemHandler;
+            var mode = itemHandler.HiddenSongMode;
+            var toRemove = new System.Collections.Generic.List<string>();
+
+            for (var i = 0; i < __result.Count; i++) {
+                var uid = __result[i];
+                if (string.IsNullOrEmpty(uid) || !uid.StartsWith("999"))
+                    continue;
+
+                bool shouldHide = mode switch {
+                    ShownSongMode.Unlocks => !itemHandler.UnlockedSongUids.Contains(uid),
+                    ShownSongMode.Unplayed => !itemHandler.UnlockedSongUids.Contains(uid) || itemHandler.CompletedSongUids.Contains(uid),
+                    ShownSongMode.Hinted => !ArchipelagoStatic.SessionHandler.HintHandler.HasLocationHint(uid) || itemHandler.CompletedSongUids.Contains(uid),
+                    ShownSongMode.AllInLogic => !itemHandler.SongsInLogic.Contains(uid),
+                    _ => false
+                };
+
+                if (shouldHide)
+                    toRemove.Add(uid);
+            }
+
+            foreach (var uid in toRemove)
+                __result.Remove(uid);
+
+            if (toRemove.Count > 0)
+                ArchipelagoStatic.ArchLogger.Log("StageShowList", $"Removed {toRemove.Count} custom songs in mode {mode}");
+        }
+        catch (Exception e) {
+            ArchipelagoStatic.ArchLogger.Error("StageShowListPatch", e);
+        }
+    }
+}

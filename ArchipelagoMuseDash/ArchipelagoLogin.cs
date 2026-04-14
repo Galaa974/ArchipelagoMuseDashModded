@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Text;
 using ArchipelagoMuseDash.Helpers;
 using Il2Cpp;
@@ -57,6 +57,7 @@ public class ArchipelagoLogin {
     private bool _backedUpFile;
     private bool _waiting;
     private bool _connectedOnce;
+    private bool _useModdedSongs;
 
     public ArchipelagoLogin(string versionNumber, string trueVersion) {
 #if DEBUG
@@ -74,6 +75,10 @@ public class ArchipelagoLogin {
 
         _versionNumber = versionNumber;
         _trueVersion = trueVersion;
+
+        // Charger la préférence moddée
+        ArchipelagoStatic.UseModdedSongs ??= MelonPreferences.CreateEntry("ArchipelagoMuseDash", "UseModdedSongs", false);
+        _useModdedSongs = ArchipelagoStatic.UseModdedSongs.Value;
 
         MelonEvents.OnGUI.Subscribe(DrawArchipelagoScreen);
     }
@@ -136,7 +141,7 @@ public class ArchipelagoLogin {
             if (ArchipelagoStatic.SessionHandler.IsLoggedIn)
                 GUI.ModalWindow(0, new Rect(Screen.width / 2.0f - 175, Screen.height / 2.0f - 90, 350, 180), (GUI.WindowFunction)DrawDisconnectWindow, "Disconnect from Archipelago", _windowStyle);
             else
-                GUI.ModalWindow(0, new Rect(Screen.width / 2.0f - 250, Screen.height / 2.0f - 215, 500, 430), (GUI.WindowFunction)DrawMainWindow, "Connect to an Archipelago Server", _windowStyle);
+                GUI.ModalWindow(0, new Rect(Screen.width / 2.0f - 250, Screen.height / 2.0f - 240, 500, 480), (GUI.WindowFunction)DrawMainWindow, "Connect to an Archipelago Server", _windowStyle);
             
             GUI.enabled = true;
         }
@@ -172,6 +177,8 @@ public class ArchipelagoLogin {
         GUILayout.Label(_error ?? "", _labelCenterStyle, new Il2CppReferenceArray<GUILayoutOption>(new[] {
             GUILayout.Height(40f)
         }));
+
+        _useModdedSongs = GUILayout.Toggle(_useModdedSongs, "Enable Modded Songs (.mdm via CustomAlbums)", _toggleStyle);
 
         GUILayout.BeginHorizontal();
         if (_connectedOnce) {
@@ -394,6 +401,8 @@ public class ArchipelagoLogin {
                     _connectedOnce = true;
                 }
 
+                ArchipelagoStatic.UseModdedSongs.Value = _useModdedSongs;
+                MelonPreferences.Save();
                 ArchipelagoStatic.SessionHandler.StartSession();
                 DataHelper.isUnlockAllMaster = true;
 

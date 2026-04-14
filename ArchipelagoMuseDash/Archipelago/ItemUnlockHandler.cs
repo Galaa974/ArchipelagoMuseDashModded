@@ -1,4 +1,4 @@
-﻿using Archipelago.MultiClient.Net.Models;
+using Archipelago.MultiClient.Net.Models;
 using ArchipelagoMuseDash.Archipelago.Items;
 using ArchipelagoMuseDash.Helpers;
 using ArchipelagoMuseDash.Patches;

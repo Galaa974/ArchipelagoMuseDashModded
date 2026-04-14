@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Archipelago.MultiClient.Net;
 using Archipelago.MultiClient.Net.Models;
 using Archipelago.MultiClient.Net.Packets;
@@ -170,7 +170,10 @@ public class HintHandler {
     public HashSet<string> GetHintedSongs() => _locationHints.Keys.ToHashSet();
     public bool HasLocationHint(string uid) {
         var itemName = ArchipelagoStatic.AlbumDatabase.GetItemNameFromUid(uid);
-        return _locationHints.ContainsKey(itemName + "-0") || _locationHints.ContainsKey(itemName + "-1");
+        var has0 = _locationHints.ContainsKey(itemName + "-0");
+        var has1 = _locationHints.ContainsKey(itemName + "-1");
+        ArchipelagoStatic.ArchLogger.Log("HintHandler", $"HasLocationHint: uid={uid} name='{itemName}' has0={has0} has1={has1} locationHints=[{string.Join(", ", _locationHints.Keys)}]");
+        return has0 || has1;
     }
 
     private bool TryGetSongHints(MusicInfo info, out string hint) {
